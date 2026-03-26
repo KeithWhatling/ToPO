@@ -1,0 +1,128 @@
+---
+topo: "1.0"
+solution: [project-name]
+owner: [team-or-individual]
+lifecycle: active
+platforms: [platform-name]
+last_updated: [date]
+---
+
+# Solution Map: [Project Name]
+
+> **Format:** TOPO v1.0 (Topology of Platform Objects)
+> **Language reference:** `docs/topo-language-spec.md`
+> **SOPs:** `docs/topo-standard-operating-procedures.md`
+
+---
+
+## 1. Solution Intent
+
+**Objective:** [One paragraph: what this solution does, who it serves, and why it exists]
+
+**Design principles:**
+- [Principle 1]
+- [Principle 2]
+- [Principle 3]
+
+---
+
+## 2. Platform Profile: [Platform Name]
+
+| Abstract Type | Concrete Type | Runtime | Notes |
+|---|---|---|---|
+| Data Entity | | | |
+| Server Logic | | | |
+| Client Logic | | | |
+| API | | | |
+| Shared Function | | | |
+| Background Process | | | |
+| UI Control | | | |
+| Config Pattern | | | |
+| Integration Boundary | | | |
+
+---
+
+## 3. Config Patterns [CFG]
+
+(none in current scope)
+
+---
+
+## 4. Data Entities [DE]
+
+<!-- Order: config > parameter > reference > transactional > junction. See SOP-2. -->
+
+(none in current scope)
+
+---
+
+## 5. Server Logic [SL]
+
+<!-- Order: config-driven > bespoke. See SOP-3. -->
+
+(none in current scope)
+
+---
+
+## 6. Client Logic [CL]
+
+<!-- Every [CL] MUST set parity. See SOP-4. -->
+
+(none in current scope)
+
+---
+
+## 7. APIs [API]
+
+(none in current scope)
+
+---
+
+## 8. Shared Functions [SF]
+
+(none in current scope)
+
+---
+
+## 9. Background Processes [BP]
+
+(none in current scope)
+
+---
+
+## 10. UI Controls [UC]
+
+(none in current scope)
+
+---
+
+## 11. Integration Boundaries [IB]
+
+<!-- Include contract/boundary/operational layers. See SOP-10. -->
+
+(none in current scope)
+
+---
+
+## 12. Parity Contracts
+
+| Rule | Client Enforcement | Server Enforcement | Status |
+|---|---|---|---|
+| | | | |
+
+---
+
+## 13. Dependency Graph
+
+```mermaid
+graph TD
+    %% Run /topo-validate or /topo-update to generate.
+```
+
+---
+
+## 14. Architectural Rules
+
+1. **Map maintenance:** Every component change MUST update this map.
+2. **Impact analysis:** Before modifying any component, check its `depended_on_by` table.
+3. [Add project-specific rules here]

@@ -1,0 +1,696 @@
+---
+topo: "1.0"
+solution: smart-shopping-list
+owner: contoso-delivery-team
+lifecycle: active
+platforms: [dataverse]
+last_updated: 2026-03-21
+---
+
+# Solution Map: Smart Shopping List
+
+## 1. Solution Intent
+
+A smart shopping system that uses a 3-table pattern to control item behaviour via
+configuration, validate inventory against an external system, and provide real-time
+health feedback on the UI.
+
+**Design principles:**
+- Configuration over code: repeatable logic lives in config entities, not hardcoded
+- Parity: every client-side rule has a server-side equivalent enforcing the same constraint
+- External integrations wrapped in shared functions for reuse and testability
+
+---
+
+## 2. Platform Profile: Dataverse
+
+This section maps every abstract component type to its concrete Dataverse implementation.
+Agents reading this map should use Dataverse-native terminology when generating code,
+but the architecture above this section is platform-agnostic.
+
+| Abstract Type | Dataverse Concrete | Runtime | Notes |
+|---|---|---|---|
+| Data Entity | Dataverse Table (Entity) | Dataverse storage | Schema in `docs/dataverse-schema.md` |
+| Server Logic | C# Plugin (.NET 4.6.2, sandbox) | Plugin Execution Pipeline | Registered via Plugin Registration Tool |
+| Client Logic | TypeScript Form Script | Model-driven app form | Loaded as web resource, bound to form events |
+| API | Custom API (contoso_ prefixed) | Dataverse Web API | Callable via `POST /api/data/v9.2/contoso_ApiName` |
+| Shared Function | C# class/method in plugin assembly | Plugin Execution Pipeline | No independent deployment; linked at compile time |
+| Background Process | Power Automate Flow | Power Automate runtime | Connector orchestration only; no business logic |
+| UI Control | PCF Control (React + Fluent UI v9) | Model-driven app form | Bound to field or dataset |
+| Config Pattern | contoso_Config* table + generic plugin handler | Plugin pipeline reads config at runtime | New rules = new rows, not code |
+| Data Field | Dataverse Column (Attribute) | Dataverse storage | Only tracked here when it drives logic |
+| Data Relationship | Dataverse Lookup / N:N | Dataverse storage | Cascade behaviour configured per relationship |
+| Integration Boundary | External HTTP endpoint | Called from plugin via HttpClient | Sandboxed; outbound only |
+
+---
+
+## 3. Config Patterns
+
+### FieldConcatenation
+```yaml
+kind: config-pattern
+id: field-concatenation
+lifecycle: active
+```
+- **intent:** Drives all field concatenation and formatting across all entities from config rows
+- **config-entity:** [DE] contoso_configfieldrule
+- **handler:** [SL] ConfigurableFieldConcatenator
+- **applies-to:** [DE] contoso_shoppinglist
+- **catalogue-ref:** docs/configuration-catalogue.md#contoso_ConfigFieldRule
+
+### Validation
+```yaml
+kind: config-pattern
+id: validation
+lifecycle: active
+```
+- **intent:** Enforces validation rules (required, regex, range, cross-field) from config rows without hardcoding thresholds
+- **config-entity:** [DE] contoso_configvalidation
+- **handler:** [SL] ConfigurableValidator
+- **applies-to:** [DE] contoso_listlineitem
+- **catalogue-ref:** docs/configuration-catalogue.md#contoso_ConfigValidation
+
+---
+
+## 4. Data Entities [DE]
+
+### [DE] contoso_configfieldrule
+```yaml
+kind: data-entity
+id: contoso_configfieldrule
+role: config
+lifecycle: active
+schema_ref: docs/dataverse-schema.md#contoso_configfieldrule
+```
+- **intent:** Stores field concatenation and formatting rules consumed at runtime by the generic handler
+- **logic-driving fields:**
+  - [DF] contoso_targetentity `text` — drives: [SL] ConfigurableFieldConcatenator (entity filter)
+  - [DF] contoso_sourcefields `json` — drives: [SL] ConfigurableFieldConcatenator (field list)
+  - [DF] contoso_formattemplate `text` — drives: [SL] ConfigurableFieldConcatenator (output format)
+- **server-logic:** (none registered — this entity is read, not triggered)
+- **client-logic:** (none)
+- **relationships:** (none)
+
+| depends_on | relationship | why |
+|---|---|---|
+| (nothing) | — | Pure config store; no upstream dependencies |
+
+| depended_on_by | relationship | impact |
+|---|---|---|
+| [SL] ConfigurableFieldConcatenator | depends_on | Schema change breaks handler's field mapping |
+| [CFG] FieldConcatenation | configures | Pattern definition references this entity |
+
+---
+
+### [DE] contoso_configvalidation
+```yaml
+kind: data-entity
+id: contoso_configvalidation
+role: config
+lifecycle: active
+schema_ref: docs/dataverse-schema.md#contoso_configvalidation
+```
+- **intent:** Stores validation rules (required, regex, range, cross-field) consumed at runtime
+- **logic-driving fields:**
+  - [DF] contoso_targetentity `text` — drives: [SL] ConfigurableValidator (entity filter)
+  - [DF] contoso_ruledefinition `json` — drives: [SL] ConfigurableValidator (rule logic)
+  - [DF] contoso_ruletype `choice` — drives: [SL] ConfigurableValidator (evaluation strategy)
+- **server-logic:** (none registered)
+- **client-logic:** (none)
+- **relationships:** (none)
+
+| depends_on | relationship | why |
+|---|---|---|
+| (nothing) | — | Pure config store |
+
+| depended_on_by | relationship | impact |
+|---|---|---|
+| [SL] ConfigurableValidator | depends_on | Schema change breaks handler's rule evaluation |
+| [CFG] Validation | configures | Pattern definition references this entity |
+
+---
+
+### [DE] contoso_itemtype
+```yaml
+kind: data-entity
+id: contoso_itemtype
+role: parameter
+lifecycle: active
+schema_ref: docs/dataverse-schema.md#contoso_itemtype
+```
+- **intent:** Parameter entity controlling how the system treats different item categories — acts as the behavioural switch for health checks, quantity limits, and categorisation
+- **logic-driving fields:**
+  - [DF] contoso_enablehealthcheck `boolean` — drives: [CL] HighlightHealthStatus
+  - [DF] contoso_maxquantity `number` — drives: [SL] ValidateItem, [CL] EnforceQuantityLimit
+  - [DF] contoso_category `choice` — Produce, Meat, Dairy, Household
+- **server-logic:** (none registered on this entity)
+- **client-logic:** (none on this entity's forms)
+- **relationships:**
+  - [DR] 1:N > [DE] contoso_shoppinglist (via: contoso_itemtypeid)
+  - [DR] 1:N > [DE] contoso_listlineitem (via: contoso_itemtypeid)
+
+| depends_on | relationship | why |
+|---|---|---|
+| (nothing) | — | Top-level parameter entity |
+
+| depended_on_by | relationship | impact |
+|---|---|---|
+| [SL] ValidateItem | depends_on | Reads contoso_maxquantity for threshold |
+| [CL] HighlightHealthStatus | depends_on | Reads contoso_enablehealthcheck flag |
+| [CL] EnforceQuantityLimit | depends_on | Reads contoso_maxquantity for client-side warning |
+
+---
+
+### [DE] contoso_shoppinglist
+```yaml
+kind: data-entity
+id: contoso_shoppinglist
+role: transactional
+lifecycle: active
+schema_ref: docs/dataverse-schema.md#contoso_shoppinglist
+```
+- **intent:** Parent record representing a specific shopping trip — aggregates line items, displays health scores, and holds computed summaries
+- **logic-driving fields:**
+  - [DF] contoso_nutritionscore `number` — drives: [CL] HighlightHealthStatus (trigger field)
+  - [DF] contoso_totalcost `number` — drives: [CL] CalculateTotal (written by client rollup)
+  - [DF] contoso_listsummary `text` — drives: [SL] ConfigurableFieldConcatenator (target field)
+- **server-logic:** [SL] ConfigurableFieldConcatenator (Update.PreOperation)
+- **client-logic:** [CL] HighlightHealthStatus (OnChange), [CL] CalculateTotal (OnLoad)
+- **relationships:**
+  - [DR] N:1 > [DE] contoso_itemtype (via: contoso_itemtypeid)
+  - [DR] 1:N > [DE] contoso_listlineitem (via: contoso_shoppinglistid)
+
+| depends_on | relationship | why |
+|---|---|---|
+| [DE] contoso_itemtype | depends_on | Categorisation and health check flags |
+
+| depended_on_by | relationship | impact |
+|---|---|---|
+| [CL] CalculateTotal | depends_on | Rolls up from line items into this entity |
+| [SL] ConfigurableFieldConcatenator | depends_on | Writes to contoso_listsummary on this entity |
+
+---
+
+### [DE] contoso_listlineitem
+```yaml
+kind: data-entity
+id: contoso_listlineitem
+role: transactional
+lifecycle: active
+schema_ref: docs/dataverse-schema.md#contoso_listlineitem
+```
+- **intent:** Individual item added to a shopping list — validated against inventory and quantity limits before save
+- **logic-driving fields:**
+  - [DF] contoso_quantity `number` — drives: [SL] ValidateItem, [SL] ConfigurableValidator, [CL] EnforceQuantityLimit
+  - [DF] contoso_totalcost `number` — drives: [CL] CalculateTotal (source for parent rollup)
+  - [DF] contoso_itemid `lookup` — drives: [SL] ValidateItem (resolves item type for threshold lookup)
+- **server-logic:** [SL] ValidateItem (Create.PreOperation), [SL] ConfigurableValidator (Create+Update.PreOperation)
+- **client-logic:** [CL] EnforceQuantityLimit (OnChange)
+- **relationships:**
+  - [DR] N:1 > [DE] contoso_shoppinglist (via: contoso_shoppinglistid)
+  - [DR] N:1 > [DE] contoso_itemtype (via: contoso_itemtypeid)
+
+| depends_on | relationship | why |
+|---|---|---|
+| [DE] contoso_shoppinglist | depends_on | Parent record |
+| [DE] contoso_itemtype | depends_on | Quantity limits and categorisation |
+
+| depended_on_by | relationship | impact |
+|---|---|---|
+| [CL] CalculateTotal | depends_on | Line item costs roll up to parent |
+| [BP] VerifyStock | triggers | Flow triggered on line item creation |
+
+---
+
+## 5. Server Logic [SL]
+
+### [SL] ConfigurableFieldConcatenator
+```yaml
+kind: server-logic
+id: configurable-field-concatenator
+subtype: config-driven
+lifecycle: active
+```
+- **intent:** Generic handler that reads field concatenation rules from config at runtime and applies them — new concat requirements are config rows, never code
+- **error-behaviour:** log-and-continue (skip malformed rules, don't block save)
+
+| depends_on | relationship | why |
+|---|---|---|
+| [DE] contoso_configfieldrule | depends_on | Reads all active rules for target entity at runtime |
+| [SF] ConfigurationService.GetFieldRules | depends_on | Uses shared function to query config |
+
+| depended_on_by | relationship | impact |
+|---|---|---|
+| [DE] contoso_shoppinglist | serves | Writes computed value to contoso_listsummary |
+| [CFG] FieldConcatenation | realizes | Implements the field concatenation pattern |
+
+**Dataverse registration:**
+- Entity: contoso_shoppinglist
+- Message: Update
+- Stage: PreOperation
+- Filtering: per config contoso_sourcefields
+
+---
+
+### [SL] ConfigurableValidator
+```yaml
+kind: server-logic
+id: configurable-validator
+subtype: config-driven
+lifecycle: active
+```
+- **intent:** Generic handler that evaluates validation rules from config against record data — blocks save with user-facing error message if rule fails
+- **error-behaviour:** throw (surfaces config-defined error message to user)
+
+| depends_on | relationship | why |
+|---|---|---|
+| [DE] contoso_configvalidation | depends_on | Reads all active rules for target entity at runtime |
+| [SF] ConfigurationService.GetValidationRules | depends_on | Uses shared function to query config |
+| [SF] ConditionEvaluator.Evaluate | depends_on | Uses shared function to evaluate rule conditions |
+
+| depended_on_by | relationship | impact |
+|---|---|---|
+| [DE] contoso_listlineitem | serves | Validates line item data before save |
+| [CFG] Validation | realizes | Implements the validation pattern |
+
+**Parity contract:** [CL] EnforceQuantityLimit must enforce the same quantity range rule client-side
+
+**Dataverse registration:**
+- Entity: contoso_listlineitem
+- Message: Create, Update
+- Stage: PreOperation
+- Filtering: per config contoso_triggerfields
+
+---
+
+### [SL] ValidateItem
+```yaml
+kind: server-logic
+id: validate-item
+subtype: bespoke
+lifecycle: active
+fit_gap_ref: docs/fit-gap-analysis.md#FG-003
+```
+- **intent:** Checks external inventory API before save — cancels creation if item is out of stock. Bespoke because it integrates with an external system (can't be config-driven).
+- **error-behaviour:** throw ("Out of stock: {itemName}")
+
+| depends_on | relationship | why |
+|---|---|---|
+| [DE] contoso_itemtype | depends_on | Reads contoso_maxquantity for threshold check |
+| [SF] InventoryApiClient.CheckStock | depends_on | Calls external API via shared function |
+| [IB] ExternalInventoryAPI | depends_on | Underlying external system |
+
+| depended_on_by | relationship | impact |
+|---|---|---|
+| [DE] contoso_listlineitem | serves | Guards line item creation |
+
+**Dataverse registration:**
+- Entity: contoso_listlineitem
+- Message: Create
+- Stage: PreOperation
+- Filtering: contoso_itemid
+
+---
+
+## 6. Client Logic [CL]
+
+### [CL] HighlightHealthStatus
+```yaml
+kind: client-logic
+id: highlight-health-status
+lifecycle: active
+```
+- **intent:** Visual feedback — highlights nutrition score field red when score is below threshold and health check is enabled for the item type
+- **trigger:** OnChange of contoso_nutritionscore on [DE] contoso_shoppinglist form
+- **writes:** contoso_nutritionscore (sets form notification)
+- **parity:** [SL] ValidateNutritionScore — **TODO: not yet built**
+
+| depends_on | relationship | why |
+|---|---|---|
+| [DE] contoso_itemtype | depends_on | Reads contoso_enablehealthcheck flag via API call |
+
+| depended_on_by | relationship | impact |
+|---|---|---|
+| (none) | — | Terminal UI component |
+
+**Dataverse specifics:**
+- Form: MainView on contoso_shoppinglist
+- Reads contoso_itemtype via `Xrm.WebApi.retrieveRecord`
+
+---
+
+### [CL] CalculateTotal
+```yaml
+kind: client-logic
+id: calculate-total
+lifecycle: active
+```
+- **intent:** Sums TotalCost from all line items and displays on the shopping list form — client-side display calculation, server uses rollup field
+- **trigger:** OnLoad + Subgrid Refresh (contoso_listlineitems grid) on [DE] contoso_shoppinglist form
+- **writes:** contoso_totalcost (sets value)
+- **parity:** (NONE — client-only display calculation; server uses native rollup field)
+
+| depends_on | relationship | why |
+|---|---|---|
+| [DE] contoso_listlineitem | depends_on | Queries line item costs via API |
+
+| depended_on_by | relationship | impact |
+|---|---|---|
+| (none) | — | Terminal UI component |
+
+**Dataverse specifics:**
+- Form: MainView on contoso_shoppinglist
+- Reads line items via `Xrm.WebApi.retrieveMultipleRecords`
+
+---
+
+### [CL] EnforceQuantityLimit
+```yaml
+kind: client-logic
+id: enforce-quantity-limit
+lifecycle: active
+```
+- **intent:** Client-side warning when quantity exceeds item type max — fast feedback before server-side validation catches it
+- **trigger:** OnChange of contoso_quantity on [DE] contoso_listlineitem form
+- **writes:** contoso_quantity (sets form notification)
+- **parity:** [SL] ConfigurableValidator (range rule on contoso_quantity)
+
+| depends_on | relationship | why |
+|---|---|---|
+| [DE] contoso_itemtype | depends_on | Reads contoso_maxquantity via API call |
+
+| depended_on_by | relationship | impact |
+|---|---|---|
+| (none) | — | Terminal UI component |
+
+**Dataverse specifics:**
+- Form: MainView on contoso_listlineitem
+- Reads contoso_itemtype via `Xrm.WebApi.retrieveRecord`
+
+---
+
+## 7. APIs [API]
+
+### [API] contoso_CheckInventory
+```yaml
+kind: api
+id: contoso_checkinventory
+lifecycle: active
+protocol: Dataverse Custom API (POST)
+```
+- **intent:** Exposes inventory availability check as a callable API for flows and external integrations
+- **request:** ItemId `guid`, Quantity `integer`
+- **response:** InStock `boolean`, AvailableQuantity `integer`, Message `string`
+- **backing-logic:** [SL] CheckInventoryPlugin
+
+| depends_on | relationship | why |
+|---|---|---|
+| [SL] CheckInventoryPlugin | realizes | Plugin implements the API logic |
+| [SF] InventoryApiClient.CheckStock | depends_on | Underlying integration call |
+| [DE] contoso_itemtype | depends_on | Item metadata lookup |
+
+| depended_on_by | relationship | impact |
+|---|---|---|
+| [BP] VerifyStock | depends_on | Flow calls this API |
+
+---
+
+## 8. Shared Functions [SF]
+
+### [SF] ConfigurationService.GetFieldRules
+```yaml
+kind: shared-function
+id: config-service-get-field-rules
+language: C#
+location: src/Plugins/Contoso.Shopping.Plugins/Configuration/Services/ConfigurationService.cs
+```
+- **intent:** Retrieves all active field concatenation rules for a given entity and message, ordered by execution priority
+- **args:** entityLogicalName `string`, messageName `string`
+- **returns:** `IReadOnlyList<FieldConcatenationRule>` — ordered by ExecutionOrder ascending; empty list if none
+
+| depends_on | relationship | why |
+|---|---|---|
+| [DE] contoso_configfieldrule | depends_on | Queries config entity via QueryExpression |
+
+| depended_on_by | relationship | impact |
+|---|---|---|
+| [SL] ConfigurableFieldConcatenator | depends_on | Called on every plugin execution |
+
+---
+
+### [SF] ConfigurationService.GetValidationRules
+```yaml
+kind: shared-function
+id: config-service-get-validation-rules
+language: C#
+location: src/Plugins/Contoso.Shopping.Plugins/Configuration/Services/ConfigurationService.cs
+```
+- **intent:** Retrieves all active validation rules for a given entity and message, ordered by execution priority
+- **args:** entityLogicalName `string`, messageName `string`
+- **returns:** `IReadOnlyList<ValidationRule>` — ordered by ExecutionOrder ascending; empty list if none
+
+| depends_on | relationship | why |
+|---|---|---|
+| [DE] contoso_configvalidation | depends_on | Queries config entity via QueryExpression |
+
+| depended_on_by | relationship | impact |
+|---|---|---|
+| [SL] ConfigurableValidator | depends_on | Called on every plugin execution |
+
+---
+
+### [SF] ConditionEvaluator.Evaluate
+```yaml
+kind: shared-function
+id: condition-evaluator-evaluate
+language: C#
+location: src/Plugins/Contoso.Shopping.Plugins/Configuration/Services/ConditionEvaluator.cs
+```
+- **intent:** Evaluates a JSON condition definition against an entity record — determines whether a validation rule applies in context
+- **args:** condition `string (JSON)`, target `Entity`
+- **returns:** `bool` — true if condition is met
+
+| depends_on | relationship | why |
+|---|---|---|
+| (nothing) | — | Pure function; no external dependencies |
+
+| depended_on_by | relationship | impact |
+|---|---|---|
+| [SL] ConfigurableValidator | depends_on | Called for conditional rule evaluation |
+
+---
+
+### [SF] InventoryApiClient.CheckStock
+```yaml
+kind: shared-function
+id: inventory-api-client-check-stock
+language: C#
+location: src/Plugins/Contoso.Shopping.Plugins/Services/InventoryApiClient.cs
+```
+- **intent:** Wraps external inventory API call — single point of integration so multiple components share the same client, error handling, and retry logic
+- **args:** itemId `guid`, quantity `int`
+- **returns:** `StockResult { InStock: bool, AvailableQuantity: int }`
+
+| depends_on | relationship | why |
+|---|---|---|
+| [IB] ExternalInventoryAPI | depends_on | Makes outbound HTTP call to external system |
+
+| depended_on_by | relationship | impact |
+|---|---|---|
+| [SL] ValidateItem | depends_on | Synchronous stock check on create |
+| [API] contoso_CheckInventory | depends_on | Async stock check via Custom API |
+
+---
+
+## 9. Background Processes [BP]
+
+### [BP] VerifyStock
+```yaml
+kind: background-process
+id: verify-stock
+lifecycle: active
+```
+- **intent:** Async stock verification after line item creation — non-blocking secondary check via Custom API (the synchronous check in [SL] ValidateItem is the primary gate)
+- **trigger:** Record created on [DE] contoso_listlineitem
+
+| depends_on | relationship | why |
+|---|---|---|
+| [DE] contoso_listlineitem | triggers | Flow triggered on line item creation |
+| [API] contoso_CheckInventory | depends_on | Calls Custom API for stock verification |
+
+| depended_on_by | relationship | impact |
+|---|---|---|
+| (none) | — | Terminal process; no downstream consumers |
+
+**Dataverse specifics:**
+- Type: Power Automate cloud flow
+- Trigger: Dataverse connector > When a row is added (contoso_listlineitem)
+- Connectors: Dataverse (Custom API call)
+- Business logic: NONE — connector orchestration only per framework rules
+
+---
+
+## 10. UI Controls [UC]
+
+(none in current scope)
+
+---
+
+## 11. Integration Boundaries [IB]
+
+### [IB] ExternalInventoryAPI
+```yaml
+kind: integration-boundary
+id: external-inventory-api
+lifecycle: active
+direction: outbound
+owner: third-party (WarehouseCo)
+```
+- **intent:** External inventory management system — provides real-time stock availability data
+
+**Contract:**
+- Protocol: REST/HTTPS
+- Auth: API key (header: `X-Api-Key`)
+- Endpoint: `GET /api/v2/inventory/{itemId}/availability`
+- Response: `{ "in_stock": bool, "available_qty": int, "last_updated": datetime }`
+- SLA: 500ms p95 latency, 99.5% uptime
+
+**Boundary:**
+- Trust: external (crosses organisation boundary)
+- Data classification: non-sensitive (stock levels only, no PII)
+- Failure mode: [SL] ValidateItem throws user-facing error; [BP] VerifyStock retries 3x then dead-letters
+
+**Operational:**
+- Rate limit: 100 req/min per API key
+- Circuit breaker: 5 consecutive failures > open for 30s
+- Monitoring: Application Insights custom metric `inventory_api_latency_ms`
+
+| depends_on | relationship | why |
+|---|---|---|
+| (external — not in solution) | — | Owned by WarehouseCo |
+
+| depended_on_by | relationship | impact |
+|---|---|---|
+| [SF] InventoryApiClient.CheckStock | depends_on | All inventory calls route through this boundary |
+
+---
+
+## 12. Parity Contracts
+
+Invariants that must hold across client and server. Every row is testable.
+
+| Rule | Client Enforcement | Server Enforcement | Status |
+|---|---|---|---|
+| Quantity must not exceed item type max | [CL] EnforceQuantityLimit (warning on form) | [SL] ConfigurableValidator (blocks save) | ACTIVE |
+| Nutrition score below threshold flags red | [CL] HighlightHealthStatus (visual indicator) | [SL] ValidateNutritionScore | **TODO — server side not built** |
+| Out-of-stock items cannot be added | (no client-side check) | [SL] ValidateItem (blocks save) | PARTIAL — server only |
+
+---
+
+## 13. Dependency Graph
+
+<!-- AUTO-GENERATED from depends_on / depended_on_by entries above -->
+
+```mermaid
+graph TD
+    subgraph Config Entities
+        DE_cfr["[DE] Config Field Rule"]
+        DE_cv["[DE] Config Validation"]
+    end
+
+    subgraph Parameter Entities
+        DE_it["[DE] Item Type"]
+    end
+
+    subgraph Transactional Entities
+        DE_sl["[DE] Shopping List"]
+        DE_lli["[DE] List Line Item"]
+    end
+
+    subgraph Config-Driven Server Logic
+        SL_cfc["[SL] ConfigurableFieldConcatenator"]
+        SL_cv["[SL] ConfigurableValidator"]
+    end
+
+    subgraph Bespoke Server Logic
+        SL_vi["[SL] ValidateItem"]
+    end
+
+    subgraph Client Logic
+        CL_hhs["[CL] HighlightHealthStatus"]
+        CL_ct["[CL] CalculateTotal"]
+        CL_eql["[CL] EnforceQuantityLimit"]
+    end
+
+    subgraph APIs
+        API_ci["[API] contoso_CheckInventory"]
+    end
+
+    subgraph Shared Functions
+        SF_gfr["[SF] GetFieldRules"]
+        SF_gvr["[SF] GetValidationRules"]
+        SF_ce["[SF] ConditionEvaluator"]
+        SF_iac["[SF] InventoryApiClient"]
+    end
+
+    subgraph Background Processes
+        BP_vs["[BP] VerifyStock"]
+    end
+
+    subgraph Integration Boundaries
+        IB_inv["[IB] External Inventory API"]
+    end
+
+    %% Config-driven server logic
+    SL_cfc -->|depends_on| DE_cfr
+    SL_cfc -->|depends_on| SF_gfr
+    SL_cfc -->|serves| DE_sl
+
+    SL_cv -->|depends_on| DE_cv
+    SL_cv -->|depends_on| SF_gvr
+    SL_cv -->|depends_on| SF_ce
+    SL_cv -->|serves| DE_lli
+
+    %% Bespoke server logic
+    SL_vi -->|depends_on| DE_it
+    SL_vi -->|depends_on| SF_iac
+    SL_vi -->|serves| DE_lli
+
+    %% Client logic
+    CL_hhs -->|depends_on| DE_it
+    CL_ct -->|depends_on| DE_lli
+    CL_eql -->|depends_on| DE_it
+
+    %% Shared functions
+    SF_gfr -->|depends_on| DE_cfr
+    SF_gvr -->|depends_on| DE_cv
+    SF_iac -->|depends_on| IB_inv
+
+    %% API
+    API_ci -->|depends_on| SF_iac
+    API_ci -->|depends_on| DE_it
+
+    %% Background process
+    BP_vs -->|triggers| DE_lli
+    BP_vs -->|depends_on| API_ci
+
+    %% Data relationships
+    DE_sl -->|depends_on| DE_it
+    DE_lli -->|depends_on| DE_sl
+    DE_lli -->|depends_on| DE_it
+
+    %% Parity links (dotted)
+    CL_eql -.->|parity| SL_cv
+    CL_hhs -.->|parity TODO| SL_vi
+```
+
+---
+
+## 14. Architectural Rules
+
+1. **Config-first:** Always check config patterns before writing bespoke server logic.
+2. **Parity:** Every client logic component that validates or transforms data MUST have a parity contract entry in section 12.
+3. **Map maintenance:** Every component creation or modification MUST update this map.
+4. **Impact analysis:** Before modifying any component, check its `depended_on_by` table for ripple effects.
+5. **Integration wrapping:** External system calls MUST be wrapped in a shared function with an integration boundary defined in section 11. Never call external APIs directly from server logic.
+6. **Quantity limits:** Always sourced from [DE] contoso_itemtype.contoso_maxquantity, never hardcoded.
